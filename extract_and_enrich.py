@@ -1,5 +1,4 @@
 import os
-import json
 import time
 import requests
 from pydantic import BaseModel, ValidationError
@@ -9,14 +8,18 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from google import genai
 from google.genai import types
+from supabase import create_client, Client
 
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
 
-if not api_key:
-    raise ValueError("Chave da API não encontrada. Verifique o arquivo .env.")
+if not api_key or not supabase_url or not supabase_key:
+    raise ValueError("Chaves faltando no arquivo .env.")
 
 client = genai.Client(api_key=api_key)
+supabase: Client = create_client(supabase_url, supabase_key)
 
 class JobInsights(BaseModel):
     tecnologias: List[str]
@@ -26,27 +29,21 @@ class JobInsights(BaseModel):
 
 def fetch_jobs_from_remotive(limit=3):
     print(f"📥 Buscando {limit} vagas na API da Remotive...")
-    url = f"https://remotive.com/api/remote-jobs?category=software-dev&limit={limit}"
-    
-    response = requests.get(url)
+    response = requests.get(f"https://remotive.com/api/remote-jobs?category=software-dev&limit={limit}")
     response.raise_for_status()
-    
     jobs = response.json().get("jobs", [])
     print(f"✅ {len(jobs)} vagas encontradas!\n")
     return jobs
 
-# Tenacity: Se der erro (ex: 429), ele espera e tenta de novo automaticamente até 4 vezes!
 @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=4, max=20))
 def enrich_job_with_ai(job_description: str) -> Optional[JobInsights]:
     prompt = f"""
-    Você é um Engenheiro de Dados especialista em análise de vagas de TI.
-    Leia a descrição da vaga abaixo (que pode conter HTML) e extraia as informações solicitadas.
+    Você é um Engenheiro de Dados especialista. Leia a descrição da vaga abaixo e extraia as informações pedidas.
     Retorne EXATAMENTE um JSON válido.
     
-    Descrição da Vaga:
+    Vaga:
     {job_description}
     """
-    
     try:
         response = client.models.generate_content(
             model='gemini-3.5-flash',
@@ -56,37 +53,59 @@ def enrich_job_with_ai(job_description: str) -> Optional[JobInsights]:
                 response_schema=JobInsights,
             ),
         )
-        job_data = JobInsights.model_validate_json(response.text)
-        return job_data
-    
-    except ValidationError as e:
-        print(f"⚠️ Erro de validação do Pydantic: {e}")
-        return None
+        return JobInsights.model_validate_json(response.text)
     except Exception as e:
-        print(f"⚠️ Erro na IA (será tentado novamente se for Rate Limit): {e}")
-        raise # Levanta o erro para o Tenacity capturar e fazer o Retry
+        print(f"⚠️ Erro na IA: {e}")
+        raise 
 
 if __name__ == "__main__":
-    print("🚀 Iniciando Pipeline ETL - Fase 1.5 (Resiliência)\n")
+    print("🚀 Iniciando Pipeline ETL -> Conectado ao Supabase!\n")
     
-    # Vamos pegar só 3 para o teste ser mais rápido, mas agora a API não vai bloquear!
+    # Pegamos 3 vagas
     raw_jobs = fetch_jobs_from_remotive(limit=3)[:3]
     
     for i, job in enumerate(raw_jobs, 1):
         print("-" * 50)
-        print(f"🏢 Vaga {i}: {job['title']} na {job['company_name']}")
+        print(f"🏢 Processando Vaga {i}: {job['title']}")
         
         insights = enrich_job_with_ai(job["description"])
         
         if insights:
             print(f"✨ Tecnologias extraídas: {insights.tecnologias}")
-            print(f"✨ Senioridade: {insights.senioridade}")
-        else:
-            print("❌ Falha ao processar essa vaga.")
             
-        # O Pulo do Gato para a API Gratuita (5 requisições por minuto = 1 a cada 12 seg)
+            # PREPARANDO DADOS PARA O BANCO (Camada Gold)
+            job_data = {
+                "id_original": str(job["id"]),
+                "titulo": job["title"],
+                "nome_empresa": job["company_name"],
+                "url": job["url"],
+                "senioridade": insights.senioridade,
+                "remoto": insights.remoto,
+                "salario_mencionado": insights.salario_mencionado
+            }
+            
+            try:
+                # 1. UPSERT (Faz o INSERT. Se o id_original já existir, ele só atualiza. Isso garante que nunca teremos vagas duplicadas!)
+                result = supabase.table("vagas").upsert(job_data, on_conflict="id_original").execute()
+                
+                if result.data:
+                    vaga_id = result.data[0]['id']
+                    
+                    # 2. Deleta as tecnologias antigas dessa vaga (caso seja atualização)
+                    supabase.table("vagas_tecnologias").delete().eq("vaga_id", vaga_id).execute()
+                    
+                    # 3. Insere as tecnologias novas extraídas pela IA
+                    techs_to_insert = [{"vaga_id": vaga_id, "tecnologia": tech} for tech in insights.tecnologias]
+                    if techs_to_insert:
+                        supabase.table("vagas_tecnologias").insert(techs_to_insert).execute()
+                        
+                    print("💾 Salvo com sucesso no Supabase!")
+            except Exception as e:
+                print(f"❌ Erro ao salvar no banco de dados: {e}")
+        
+        # Rate Limiting do Gemini Grátis
         if i < len(raw_jobs):
             print("⏳ Pausa de 12 segundos (Rate Limit)...")
             time.sleep(12)
             
-    print("\n🏁 Fase 1.5 concluída com sucesso! Nenhuma vaga perdida.")
+    print("\n🏁 Pipeline finalizado! Vá olhar a aba 'Table Editor' no Supabase!")

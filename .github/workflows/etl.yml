@@ -1,0 +1,31 @@
+name: 🚀 TechSkills Daily ETL
+
+on:
+  schedule:
+    # Roda todos os dias às 09:00 UTC (06:00 BRT)
+    - cron: '0 9 * * *'
+  workflow_dispatch: # Permite rodar clicando em um botão manualmente no GitHub
+
+jobs:
+  run-etl:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 🛎️ Checkout do código
+        uses: actions/checkout@v4
+        
+      - name: 🐍 Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          
+      - name: 📦 Instalar dependências
+        run: pip install -r requirements.txt
+        
+      - name: ⚙️ Rodar o Pipeline de Dados
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python extract_and_enrich.py
