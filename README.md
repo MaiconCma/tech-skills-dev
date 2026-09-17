@@ -1,5 +1,7 @@
 # 🚀 TechSkills.dev (Motor de Inteligência de Vagas)
 
+🌍 **Acesse o painel ao vivo:** [skills-dev.streamlit.app](https://skills-dev.streamlit.app/)
+
 Um pipeline de **Engenharia de Dados ponta a ponta** que consome vagas de TI, utiliza Inteligência Artificial (LLM) para extrair dados estruturados e exibe insights em um dashboard analítico.
 
 ## 🏗️ Arquitetura do Projeto
